@@ -19,7 +19,8 @@ if getattr(_model_mod, "CODE_VERSION", None) != MODEL_CODE_VERSION:
     _model_mod = importlib.reload(_model_mod)
     _model_mod.CODE_VERSION = MODEL_CODE_VERSION
 
-from model import (CLASSES, CONTINUOUS, GROUPS, TARGET, label_for, load_default,  # noqa: E402
+from model import (CLASSES, CONTINUOUS, FAMILY_ORDER, GROUPS, TARGET, label_for,  # noqa: E402
+                   load_default,
                    read_table, train, DATA_PATH as DATA_CSV)
 
 SAMPLE_DIR = DATA_CSV.parent.parent / "sample_data"
@@ -61,7 +62,7 @@ def get_data(file_bytes: bytes | None, file_name: str | None) -> pd.DataFrame:
     return read_table(buf)
 
 
-@st.cache_resource(show_spinner="Training 10 models… (about a minute, first run only)")
+@st.cache_resource(show_spinner="Training 14 models (bagging, boosting, stacking, hybrid)… about 1–2 minutes, first run only")
 def get_model(data_key: str, _df: pd.DataFrame, code_version: str = ""):
     # code_version = hash of model.py, so a redeploy with new model code retrains
     # instead of serving a stale cached result.
@@ -73,7 +74,7 @@ with st.sidebar:
     st.caption("Student Academic Performance Prediction System")
     page = st.radio("Navigate", ["🏠 Home", "🧠 Train Model", "📊 Data Explorer",
                                  "🔮 Predict Student", "📁 Batch Prediction",
-                                 "📈 Model Performance"],
+                                 "📈 Model Performance", "🧩 Ensemble Insights"],
                     label_visibility="collapsed")
     st.divider()
 
@@ -102,6 +103,9 @@ with st.sidebar:
     res = res.use(chosen)
     st.success(f"**Model:** {res.model_name}\n\n**Test accuracy:** {res.accuracy:.1%}\n\n"
                f"**Trained on:** {src_label} ({len(df):,} rows, {len(ranked)} models compared)")
+    st.caption("🤖 **AI disclosure:** the code and the dashboard UI of this project were "
+               "generated with the help of Claude (Anthropic), a generative-AI tool, and "
+               "then reviewed, run and tested by the student.")
 
 
 def show_board(board: pd.DataFrame):
@@ -153,7 +157,8 @@ if page == "🏠 Home":
     a, b, c = st.columns(3)
     a.info("**1. Data** — 36 attributes per student: background, finances, "
            "and 1st/2nd semester results.")
-    b.info(f"**2. Model** — 10 algorithms are compared; **{best_name}** "
+    b.info(f"**2. Model** — {len(ranked)} models (bagging, boosting, stacking, voting, "
+           f"hybrid RF+ANN and single-model baselines) are compared; **{best_name}** "
            f"performed best ({res.models[best_name]['accuracy']:.1%} accuracy).")
     c.info("**3. Predict** — retrain on your own data in *Train Model*, then enter a student's details on the *Predict Student* "
            "page, or upload a file for batch prediction.")
@@ -191,8 +196,8 @@ elif page == "🧠 Train Model":
                 if vc.min() < 5:
                     st.error("Each Target class needs at least 5 students to train.")
                 elif st.button("🚀 Train models on this dataset", type="primary", width="stretch"):
-                    with st.spinner("Training 10 models (Logistic Regression, Random Forest, SVM, "
-                                    "Neural Network…). This takes about a minute."):
+                    with st.spinner("Training 14 models (bagging, boosting, stacking, voting, hybrid RF+ANN, "
+                                    "baselines). This takes 1–2 minutes."):
                         get_model(hashlib.md5(up.getvalue()).hexdigest(), preview, MODEL_CODE_VERSION)
                     st.session_state["train_src"] = (up.getvalue(), up.name)
                     st.session_state["just_trained"] = True
@@ -354,7 +359,7 @@ elif page == "📁 Batch Prediction":
         except Exception as exc:
             st.error(f"Could not read file: {exc}")
 
-else:  # Model Performance
+elif page == "📈 Model Performance":
     hero("📈 Model Performance", "How well the models predict on unseen students (20% test set).")
     c1, c2, c3 = st.columns(3)
     c1.markdown(f"**Best model**\n\n### ⭐ {best_name}")
@@ -402,3 +407,187 @@ else:  # Model Performance
                  labels={"x": "Importance", "y": ""})
     fig.update_traces(marker_color="#3A6FD8")
     st.plotly_chart(fig, width="stretch")
+
+else:  # Ensemble Insights
+    hero("🧩 Ensemble Learning Insights",
+         "Bagging vs boosting vs stacking vs hybrid — what the results say and why "
+         "the models behave this way.")
+    board = res.leaderboard.copy()
+    M = res.models
+    acc = lambda n: M[n]["accuracy"]  # noqa: E731
+    f1 = lambda n: M[n]["f1"]  # noqa: E731
+    y_te = res.y_test
+
+    def recall_of(name: str, cls: str) -> float:
+        mask = y_te == cls
+        return float((M[name]["pred"][mask] == cls).mean()) if mask.any() else float("nan")
+
+    # ---------------------------------------------------------------- family overview
+    st.subheader("1. Which ensemble family works best?")
+    fam = (board.groupby("Family")
+           .agg(**{"Best accuracy": ("Accuracy", "max"), "Mean accuracy": ("Accuracy", "mean"),
+                   "Best F1 (macro)": ("F1 (macro)", "max"), "Models": ("Model", "count")})
+           .reindex([f for f in FAMILY_ORDER if f in set(board["Family"])]))
+    fam["Best model"] = [board[board["Family"] == f].iloc[0]["Model"] for f in fam.index]
+    l, r = st.columns([3, 2])
+    with l:
+        long = fam.reset_index().melt(id_vars="Family",
+                                      value_vars=["Best accuracy", "Best F1 (macro)"])
+        fig = px.bar(long, x="Family", y="value", color="variable", barmode="group",
+                     text=long["value"].map(lambda v: f"{v:.1%}"),
+                     color_discrete_sequence=["#3A6FD8", "#9DB8EE"],
+                     labels={"value": "", "variable": "", "Family": ""})
+        lo = max(0.0, float(long["value"].min()) - 0.1)
+        fig.update_layout(yaxis_range=[lo, 1], yaxis_tickformat=".0%", height=380,
+                          margin=dict(t=10))
+        st.plotly_chart(fig, width="stretch")
+    with r:
+        st.dataframe(fam.style.format({"Best accuracy": "{:.2%}", "Mean accuracy": "{:.2%}",
+                                       "Best F1 (macro)": "{:.3f}"}), width="stretch")
+        top_fam = fam["Best F1 (macro)"].idxmax()
+        st.success(f"Best family by F1: **{top_fam}** ({fam.loc[top_fam, 'Best model']}). "
+                   f"Overall best model: **{best_name}** ({acc(best_name):.1%} accuracy).")
+
+    # ---------------------------------------------------------------- bagging vs boosting
+    st.subheader("2. Bagging vs Boosting — Random Forest vs Gradient Boosting")
+    rf, gb = "Random Forest", "Gradient Boosting"
+    cls_list = [c for c in CLASSES if c in set(y_te)]
+    comp = pd.DataFrame({
+        "Metric": ["Accuracy", "F1 (macro)"] + [f"Recall – {c}" for c in cls_list]
+                  + ["Train time (s)"],
+        rf: [acc(rf), f1(rf)] + [recall_of(rf, c) for c in cls_list] + [M[rf]["train_time"]],
+        gb: [acc(gb), f1(gb)] + [recall_of(gb, c) for c in cls_list] + [M[gb]["train_time"]],
+    }).set_index("Metric")
+    l, r = st.columns([2, 3])
+    with l:
+        st.dataframe(comp.style.format("{:.3f}"), width="stretch")
+    with r:
+        better_f1 = gb if f1(gb) > f1(rf) else rf
+        enr = "Enrolled" if "Enrolled" in cls_list else cls_list[0]
+        st.markdown(
+            f"**What we see:** accuracy is almost the same ({acc(rf):.1%} vs {acc(gb):.1%}), "
+            f"but **{better_f1}** has the higher macro-F1, and recall on the hard *{enr}* "
+            f"class is {recall_of(rf, enr):.0%} for Random Forest vs "
+            f"{recall_of(gb, enr):.0%} for Gradient Boosting.\n\n"
+            "**Why:**\n"
+            "- **Bagging (Random Forest)** trains many deep trees *in parallel* on bootstrap "
+            "samples and averages them. This mainly **reduces variance**, so it is stable and "
+            "hard to overfit, but the average leans towards the majority classes "
+            "(*Graduate*, *Dropout*).\n"
+            "- **Boosting (Gradient Boosting)** builds shallow trees *one after another*, each "
+            "fitting the errors of the previous ones. This **reduces bias** and pays extra "
+            f"attention to hard, borderline students, which is why it usually does better on "
+            f"the in-between *{enr}* class. The cost is sequential (slower) training and more "
+            "sensitivity to tuning.")
+
+    # ---------------------------------------------------------------- stacking
+    st.subheader("3. Stacking & Voting — combining different models")
+    bases = ["Random Forest", "Extra Trees", "Gradient Boosting", "K-Nearest Neighbors"]
+    ens = ["Stacking", "Voting (soft)"]
+    stack_cmp = pd.DataFrame({"Model": ens + bases})
+    stack_cmp["Accuracy"] = stack_cmp["Model"].map(acc)
+    stack_cmp["F1 (macro)"] = stack_cmp["Model"].map(f1)
+    stack_cmp["Type"] = stack_cmp["Model"].isin(ens).map(
+        {True: "Ensemble of models", False: "Base model"})
+    l, r = st.columns([3, 2])
+    with l:
+        fig = px.bar(stack_cmp, x="Model", y="F1 (macro)", color="Type",
+                     text=stack_cmp["F1 (macro)"].map(lambda v: f"{v:.3f}"),
+                     color_discrete_map={"Ensemble of models": "#29A36A",
+                                         "Base model": "#9DB8EE"},
+                     labels={"Type": "", "Model": ""}, title="Stacking vs its base models")
+        fig.update_layout(yaxis_range=[max(0.0, stack_cmp["F1 (macro)"].min() - 0.1), None],
+                          height=380, margin=dict(t=40))
+        st.plotly_chart(fig, width="stretch")
+    with r:
+        names = ["Random Forest", "Gradient Boosting", "K-Nearest Neighbors",
+                 "Logistic Regression"]
+        dis = pd.DataFrame(
+            [[float((M[a]["pred"] != M[b]["pred"]).mean()) for b in names] for a in names],
+            index=names, columns=names)
+        fig = px.imshow(dis, text_auto=".0%", color_continuous_scale="Greens",
+                        title="How often two models disagree", aspect="auto")
+        fig.update_layout(height=380, margin=dict(t=40), coloraxis_showscale=False)
+        st.plotly_chart(fig, width="stretch")
+    best_base = max(bases, key=f1)
+    gain = f1("Stacking") - f1(best_base)
+    st.markdown(
+        f"**What we see:** Stacking reaches **{acc('Stacking'):.1%}** accuracy and "
+        f"**{f1('Stacking'):.3f}** macro-F1 ({gain:+.3f} F1 compared with its best base model, "
+        f"{best_base}). Soft voting gets {acc('Voting (soft)'):.1%}.\n\n"
+        "**Why:** the base models make *different* mistakes (see the disagreement matrix). "
+        "**Soft voting** simply averages their probabilities. **Stacking** goes further: a "
+        "Logistic-Regression *meta-learner* is trained on the base models' out-of-fold "
+        "probabilities (5-fold CV), so it learns *which model to trust for which kind of "
+        "student*. Gains are modest because the strongest base models are already tree "
+        "ensembles that agree on most students — combining models helps most when their "
+        "errors are uncorrelated.")
+
+    # ---------------------------------------------------------------- hybrid
+    st.subheader("4. Hybridization — Random Forest + ANN")
+    hy = "Hybrid RF + ANN"
+    hcmp = pd.DataFrame({"Model": ["Random Forest", "Neural Network (MLP)", hy]})
+    hcmp["Accuracy"] = hcmp["Model"].map(acc)
+    hcmp["F1 (macro)"] = hcmp["Model"].map(f1)
+    l, r = st.columns([2, 3])
+    with l:
+        st.dataframe(hcmp.style.format({"Accuracy": "{:.2%}", "F1 (macro)": "{:.3f}"}),
+                     width="stretch", hide_index=True)
+    with r:
+        vs_ann = acc(hy) - acc("Neural Network (MLP)")
+        vs_rf = acc(hy) - acc("Random Forest")
+        st.markdown(
+            "**How it works:** the Random Forest's out-of-fold class probabilities are added "
+            "as 3 extra inputs to a neural network, which is trained on the scaled original "
+            "features + these \"forest opinions\".\n\n"
+            f"**What we see:** the hybrid is {vs_ann * 100:+.1f} points vs the ANN alone and "
+            f"{vs_rf * 100:+.1f} points vs the Random Forest alone. The forest gives the ANN a "
+            "strong, already non-linear summary of the data. It does not clearly beat the "
+            "forest itself because on a small tabular dataset (~3,500 training rows) the "
+            "forest already captures most of the signal; the ANN also needed strong "
+            "regularisation (L2 alpha = 1.0) to stop it over-trusting the RF features.")
+
+    # ---------------------------------------------------------------- behaviour
+    st.subheader("5. Why the models behave this way")
+    l, r = st.columns(2)
+    with l:
+        top = res.importance.head(8)[::-1]
+        fig = px.bar(x=top.values, y=top.index, orientation="h",
+                     title="What drives the prediction (RF importance)",
+                     labels={"x": "Importance", "y": ""})
+        fig.update_traces(marker_color="#3A6FD8")
+        fig.update_layout(height=380)
+        st.plotly_chart(fig, width="stretch")
+    with r:
+        fig = px.scatter(board, x="Train time (s)", y="F1 (macro)", color="Family",
+                         hover_name="Model", log_x=True, title="Quality vs training cost")
+        fig.update_traces(marker_size=12)
+        fig.update_layout(height=380)
+        st.plotly_chart(fig, width="stretch")
+    share = df[TARGET].value_counts(normalize=True)
+    st.markdown(
+        "- **Semester results dominate.** Approved units and grades in the 1st and 2nd "
+        "semester are the strongest signals; students who pass few units are very likely to "
+        "drop out. Every model can use this, which is why many models land close together "
+        f"(median accuracy {board['Accuracy'].median():.0%}).\n"
+        f"- **Class imbalance.** Graduate {share.get('Graduate', 0):.0%}, Dropout "
+        f"{share.get('Dropout', 0):.0%}, Enrolled {share.get('Enrolled', 0):.0%}. *Enrolled* "
+        "students sit between the other two profiles, so every model finds them hardest; "
+        "macro-F1 is reported next to accuracy so this class is not ignored.\n"
+        "- **Single models have clear weak spots:** Naive Bayes assumes independent features "
+        "(but 1st/2nd-semester features are strongly correlated); KNN struggles in 36 "
+        "dimensions; a single Decision Tree overfits. **Ensembles fix exactly these "
+        "weaknesses** — bagging lowers variance, boosting lowers bias, stacking mixes "
+        "different strengths.\n"
+        "- **Cost vs gain.** Stacking is the most expensive to train; Random Forest / Extra "
+        "Trees give nearly the same accuracy in a fraction of the time.")
+
+    st.subheader("6. Conclusion")
+    st.info(
+        f"**{best_name}** is the best model on this dataset ({acc(best_name):.1%} accuracy, "
+        f"{f1(best_name):.3f} macro-F1). Ensembles (bagging, boosting, stacking) beat most "
+        "single-model baselines, boosting handles the hard *Enrolled* class better than "
+        "bagging, and stacking adds a small extra gain by combining models that make "
+        "different errors.")
+    st.caption("🤖 AI disclosure: code and dashboard generated with the help of Claude "
+               "(Anthropic) and reviewed/tested by the student.")

@@ -10,12 +10,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import (AdaBoostClassifier, ExtraTreesClassifier,
-                              HistGradientBoostingClassifier, RandomForestClassifier)
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.ensemble import (AdaBoostClassifier, BaggingClassifier, ExtraTreesClassifier,
+                              HistGradientBoostingClassifier, RandomForestClassifier,
+                              StackingClassifier, VotingClassifier)
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
                              f1_score, precision_score, recall_score)
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_predict, train_test_split
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
@@ -143,6 +145,7 @@ class TrainResult:
     options: dict = field(default_factory=dict)
     ranges: dict = field(default_factory=dict)
     models: dict = field(default_factory=dict)  # name -> per-model details
+    y_test: np.ndarray | None = None  # true labels of the 20% test split
 
     def use(self, name: str) -> "TrainResult":
         """Return a copy where the active model is `name` (one of the trained models)."""
@@ -151,28 +154,120 @@ class TrainResult:
                        f1_macro=m["f1"], confusion=m["confusion"], report=m["report"])
 
 
+class HybridRFANN(ClassifierMixin, BaseEstimator):
+    """Hybrid model: Random Forest + Artificial Neural Network.
+
+    1. A Random Forest is trained; its *out-of-fold* class probabilities on the training
+       set (5-fold cross_val_predict) become 3 extra features. Out-of-fold avoids leakage:
+       the ANN never sees probabilities the forest produced for rows it trained on.
+    2. An MLP (ANN) is trained on the scaled original features + the RF probabilities.
+    The forest contributes robust non-linear splits on the raw attributes; the ANN learns
+    a smooth combination of those forest "opinions" with the original signals.
+    """
+
+    def __init__(self, n_estimators=200, hidden_layer_sizes=(32,), alpha=1.0,
+                 random_state=42):
+        self.n_estimators = n_estimators
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.alpha = alpha  # strong L2: without it the ANN over-trusts the RF features
+        self.random_state = random_state
+
+    def _rf(self):
+        return RandomForestClassifier(n_estimators=self.n_estimators,
+                                      class_weight="balanced_subsample", n_jobs=-1,
+                                      random_state=self.random_state)
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        self.rf_ = self._rf()
+        oof = cross_val_predict(self._rf(), X, y, cv=5, method="predict_proba")
+        self.rf_.fit(X, y)
+        self.classes_ = self.rf_.classes_
+        self.scaler_ = StandardScaler().fit(X)
+        self.ann_ = MLPClassifier(hidden_layer_sizes=self.hidden_layer_sizes, alpha=self.alpha,
+                                  max_iter=1000, random_state=self.random_state)
+        self.ann_.fit(np.hstack([self.scaler_.transform(X), oof]), y)
+        return self
+
+    def _features(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.hstack([self.scaler_.transform(X), self.rf_.predict_proba(X)])
+
+    def predict_proba(self, X):
+        return self.ann_.predict_proba(self._features(X))
+
+    def predict(self, X):
+        return self.classes_[self.predict_proba(X).argmax(axis=1)]
+
+
+# Ensemble family of every model, used for grouping and interpretation in the dashboard.
+FAMILY = {
+    "Logistic Regression": "Single model (baseline)",
+    "Decision Tree": "Single model (baseline)",
+    "K-Nearest Neighbors": "Single model (baseline)",
+    "Support Vector Machine": "Single model (baseline)",
+    "Naive Bayes": "Single model (baseline)",
+    "Neural Network (MLP)": "Single model (baseline)",
+    "Bagging (Decision Trees)": "Bagging",
+    "Random Forest": "Bagging",
+    "Extra Trees": "Bagging",
+    "Gradient Boosting": "Boosting",
+    "AdaBoost": "Boosting",
+    "Voting (soft)": "Stacking / Voting",
+    "Stacking": "Stacking / Voting",
+    "Hybrid RF + ANN": "Hybrid",
+}
+FAMILY_ORDER = ["Single model (baseline)", "Bagging", "Boosting", "Stacking / Voting", "Hybrid"]
+
+
 def make_models() -> dict:
-    """The 10 classifiers that are trained and compared."""
+    """All classifiers that are trained and compared (14 models in 5 families)."""
     scaled = lambda est: make_pipeline(StandardScaler(), est)  # noqa: E731
+    rs = RANDOM_STATE
     return {
+        # --- single models (baselines) ---
         "Logistic Regression": scaled(LogisticRegression(max_iter=2000, C=0.5)),
         "Decision Tree": DecisionTreeClassifier(max_depth=8, min_samples_leaf=10,
-                                                random_state=RANDOM_STATE),
-        "Random Forest": RandomForestClassifier(
-            n_estimators=200, class_weight="balanced_subsample", n_jobs=-1,
-            random_state=RANDOM_STATE),
-        "Extra Trees": ExtraTreesClassifier(n_estimators=200, n_jobs=-1,
-                                            random_state=RANDOM_STATE),
-        "Gradient Boosting": HistGradientBoostingClassifier(
-            max_iter=200, learning_rate=0.08, random_state=RANDOM_STATE),
-        "AdaBoost": AdaBoostClassifier(n_estimators=200, learning_rate=0.5,
-                                       random_state=RANDOM_STATE),
+                                                random_state=rs),
         "K-Nearest Neighbors": scaled(KNeighborsClassifier(n_neighbors=15, weights="distance")),
         "Support Vector Machine": scaled(CalibratedClassifierCV(SVC(C=1.0), ensemble=False)),
         "Naive Bayes": GaussianNB(),
         "Neural Network (MLP)": scaled(MLPClassifier(
             hidden_layer_sizes=(64, 32), alpha=1e-3, max_iter=500, early_stopping=True,
-            random_state=RANDOM_STATE)),
+            random_state=rs)),
+        # --- bagging: many trees on bootstrap samples, averaged (reduces variance) ---
+        "Bagging (Decision Trees)": BaggingClassifier(
+            DecisionTreeClassifier(random_state=rs), n_estimators=100, n_jobs=-1,
+            random_state=rs),
+        "Random Forest": RandomForestClassifier(
+            n_estimators=200, class_weight="balanced_subsample", n_jobs=-1, random_state=rs),
+        "Extra Trees": ExtraTreesClassifier(n_estimators=200, n_jobs=-1, random_state=rs),
+        # --- boosting: trees built one after another, each fixing earlier errors (reduces bias) ---
+        "Gradient Boosting": HistGradientBoostingClassifier(
+            max_iter=200, learning_rate=0.08, random_state=rs),
+        "AdaBoost": AdaBoostClassifier(n_estimators=200, learning_rate=0.5, random_state=rs),
+        # --- stacking / voting: combine different model types ---
+        "Voting (soft)": VotingClassifier(
+            estimators=[("rf", RandomForestClassifier(n_estimators=200, n_jobs=-1,
+                                                      random_state=rs)),
+                        ("gb", HistGradientBoostingClassifier(max_iter=200,
+                                                              learning_rate=0.08,
+                                                              random_state=rs)),
+                        ("lr", scaled(LogisticRegression(max_iter=2000, C=0.5)))],
+            voting="soft"),
+        "Stacking": StackingClassifier(
+            estimators=[("rf", RandomForestClassifier(n_estimators=150, n_jobs=-1,
+                                                      random_state=rs)),
+                        ("et", ExtraTreesClassifier(n_estimators=150, n_jobs=-1,
+                                                    random_state=rs)),
+                        ("gb", HistGradientBoostingClassifier(max_iter=150,
+                                                              learning_rate=0.08,
+                                                              random_state=rs)),
+                        ("knn", scaled(KNeighborsClassifier(n_neighbors=15)))],
+            final_estimator=LogisticRegression(max_iter=2000), cv=5,
+            stack_method="predict_proba"),
+        # --- hybrid ---
+        "Hybrid RF + ANN": HybridRFANN(random_state=rs),
     }
 
 
@@ -194,14 +289,15 @@ def train(df: pd.DataFrame) -> TrainResult:
         pred = est.predict(X_te)
         acc = accuracy_score(y_te, pred)
         f1 = f1_score(y_te, pred, average="macro")
-        rows.append({"Model": name, "Accuracy": acc, "F1 (macro)": f1,
+        rows.append({"Model": name, "Family": FAMILY.get(name, "Other"), "Accuracy": acc, "F1 (macro)": f1,
                      "Precision (macro)": precision_score(y_te, pred, average="macro",
                                                           zero_division=0),
                      "Recall (macro)": recall_score(y_te, pred, average="macro"),
                      "Train time (s)": secs})
         fitted[name] = est
         models[name] = {
-            "model": est, "accuracy": float(acc), "f1": float(f1),
+            "model": est, "accuracy": float(acc), "f1": float(f1), "pred": np.asarray(pred),
+            "train_time": secs,
             "confusion": confusion_matrix(y_te, pred, labels=list(est.classes_)),
             "report": pd.DataFrame(classification_report(
                 y_te, pred, output_dict=True, zero_division=0)).T}
@@ -233,4 +329,4 @@ def train(df: pd.DataFrame) -> TrainResult:
         f1_macro=float(f1_score(y_te, pred, average="macro")),
         confusion=confusion_matrix(y_te, pred, labels=labels), report=report,
         importance=importance, defaults=defaults, options=options, ranges=ranges,
-        models=models)
+        models=models, y_test=np.asarray(y_te))
