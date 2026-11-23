@@ -9,7 +9,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from model import (CLASSES, CONTINUOUS, GROUPS, TARGET, label_for, load_default,
-                   read_table, train)
+                   read_table, train, DATA_PATH as DATA_CSV)
+
+SAMPLE_DIR = DATA_CSV.parent.parent / "sample_data"
 
 st.set_page_config(page_title="Student Academic Performance Prediction System",
                    page_icon="🎓", layout="wide")
@@ -56,27 +58,26 @@ def get_model(data_key: str, _df: pd.DataFrame):
 with st.sidebar:
     st.markdown("## 🎓 SAPPS")
     st.caption("Student Academic Performance Prediction System")
-    page = st.radio("Navigate", ["🏠 Home", "📊 Data Explorer", "🔮 Predict Student",
-                                 "📁 Batch Prediction", "📈 Model Performance"],
+    page = st.radio("Navigate", ["🏠 Home", "🧠 Train Model", "📊 Data Explorer",
+                                 "🔮 Predict Student", "📁 Batch Prediction",
+                                 "📈 Model Performance"],
                     label_visibility="collapsed")
     st.divider()
-    with st.expander("⚙️ Use your own dataset"):
-        up = st.file_uploader("CSV or Excel with the same columns + 'Target'",
-                              type=["csv", "xlsx", "xls"])
-        st.caption("Leave empty to use the built-in dataset (4,424 students).")
 
-file_bytes = up.getvalue() if up else None
-try:
-    df = get_data(file_bytes, up.name if up else None)
-    key = hashlib.md5(file_bytes).hexdigest() if file_bytes else "default"
-    res = get_model(key, df)
-except Exception as exc:  # bad upload -> fall back to default
-    st.sidebar.error(f"Could not use uploaded file: {exc}")
+# Training source: None = built-in dataset, else (bytes, filename) uploaded on Train page.
+src = st.session_state.get("train_src")
+if src:
+    df = get_data(*src)
+    res = get_model(hashlib.md5(src[0]).hexdigest(), df)
+    src_label = src[1]
+else:
     df = get_data(None, None)
     res = get_model("default", df)
+    src_label = "Built-in dataset"
 
 with st.sidebar:
-    st.success(f"**Model:** {res.model_name}\n\n**Test accuracy:** {res.accuracy:.1%}")
+    st.success(f"**Model:** {res.model_name}\n\n**Test accuracy:** {res.accuracy:.1%}\n\n"
+               f"**Trained on:** {src_label} ({len(df):,} rows)")
 
 
 def hero(title: str, sub: str):
@@ -120,10 +121,68 @@ if page == "🏠 Home":
            "and 1st/2nd semester results.")
     b.info(f"**2. Model** — 3 algorithms are compared; **{res.model_name}** "
            f"performed best ({res.accuracy:.1%} accuracy).")
-    c.info("**3. Predict** — enter a student's details on the *Predict Student* "
+    c.info("**3. Predict** — retrain on your own data in *Train Model*, then enter a student's details on the *Predict Student* "
            "page, or upload a file for batch prediction.")
     st.caption("Dataset: *Predict Students' Dropout and Academic Success* — "
                "UCI Machine Learning Repository (Realinho et al., 2021).")
+
+elif page == "🧠 Train Model":
+    hero("🧠 Train the Model",
+         "Upload a student dataset (CSV or Excel) and train the prediction models on it.")
+    st.markdown("#### 1. Get a dataset")
+    st.write("The file needs the 36 student attribute columns plus a **Target** column "
+             "(Dropout / Enrolled / Graduate). Download the sample dataset to see the format.")
+    d1, d2 = st.columns(2)
+    d1.download_button("⬇️ Sample dataset (Excel)",
+                       SAMPLE_DIR.joinpath("student_training_dataset.xlsx").read_bytes(),
+                       "student_training_dataset.xlsx", width="stretch")
+    d2.download_button("⬇️ Sample dataset (CSV)", DATA_CSV.read_bytes(),
+                       "student_training_dataset.csv", "text/csv", width="stretch")
+
+    st.markdown("#### 2. Upload and train")
+    up = st.file_uploader("Upload training dataset", type=["csv", "xlsx", "xls"], key="train_up")
+    if up is not None:
+        try:
+            preview = get_data(up.getvalue(), up.name)
+            missing = [c for c in res.features if c not in preview.columns]
+            if TARGET not in preview.columns:
+                st.error(f"The file has no '{TARGET}' column — the model needs it to learn.")
+            elif missing:
+                st.error(f"Missing columns: {', '.join(missing)}")
+            else:
+                vc = preview[TARGET].value_counts()
+                st.success(f"✅ {up.name}: {len(preview):,} students, {preview.shape[1]} columns — "
+                           + ", ".join(f"{k}: {v:,}" for k, v in vc.items()))
+                st.dataframe(preview.head(10), width="stretch")
+                if vc.min() < 5:
+                    st.error("Each Target class needs at least 5 students to train.")
+                elif st.button("🚀 Train models on this dataset", type="primary", width="stretch"):
+                    with st.spinner("Training Random Forest, Gradient Boosting and "
+                                    "Logistic Regression…"):
+                        get_model(hashlib.md5(up.getvalue()).hexdigest(), preview)
+                    st.session_state["train_src"] = (up.getvalue(), up.name)
+                    st.session_state["just_trained"] = True
+                    st.rerun()
+        except Exception as exc:
+            st.error(f"Could not read file: {exc}")
+
+    if src:
+        if st.button("↩️ Reset to built-in dataset"):
+            st.session_state.pop("train_src", None)
+            st.rerun()
+
+    st.markdown("#### 3. Current model")
+    if st.session_state.pop("just_trained", False):
+        st.balloons()
+        st.success(f"Training finished on **{src_label}**. All pages now use the new model.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Training rows", f"{len(df):,}")
+    c2.metric("Best accuracy", f"{res.accuracy:.1%}")
+    c3.metric("F1 (macro)", f"{res.f1_macro:.3f}")
+    st.dataframe(res.leaderboard.style.format({"Accuracy": "{:.2%}", "F1 (macro)": "{:.3f}"}),
+                 width="stretch", hide_index=True)
+    st.caption(f"Best model: **{res.model_name}** (80% of rows used for training, "
+               "20% held out for testing). See *Model Performance* for details.")
 
 elif page == "📊 Data Explorer":
     hero("📊 Data Explorer", "Explore how student attributes relate to academic outcomes.")
@@ -223,9 +282,15 @@ elif page == "🔮 Predict Student":
 
 elif page == "📁 Batch Prediction":
     hero("📁 Batch Prediction", "Upload a CSV / Excel file of students to predict all at once.")
-    tmpl = df[res.features].head(5)
-    st.download_button("⬇️ Download template (5 sample rows)",
-                       tmpl.to_csv(index=False).encode(), "students_template.csv", "text/csv")
+    st.write("The file needs the same 36 attribute columns as the training data "
+             "(no Target column needed).")
+    b1, b2 = st.columns(2)
+    b1.download_button("⬇️ Sample students (Excel)",
+                       SAMPLE_DIR.joinpath("students_to_predict.xlsx").read_bytes(),
+                       "students_to_predict.xlsx", width="stretch")
+    b2.download_button("⬇️ Empty template (CSV)",
+                       pd.DataFrame(columns=res.features).to_csv(index=False).encode(),
+                       "students_template.csv", "text/csv", width="stretch")
     f = st.file_uploader("Upload students file", type=["csv", "xlsx", "xls"], key="batch")
     if f:
         try:
