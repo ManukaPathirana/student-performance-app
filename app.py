@@ -2,13 +2,24 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from model import (CLASSES, CONTINUOUS, GROUPS, TARGET, label_for, load_default,
+import model as _model_mod
+
+# When model.py changes (e.g. a new git push on Streamlit Cloud) the running server may
+# still hold the old module; reload it and key the model cache on its hash.
+MODEL_CODE_VERSION = hashlib.md5(Path(_model_mod.__file__).read_bytes()).hexdigest()
+if getattr(_model_mod, "CODE_VERSION", None) != MODEL_CODE_VERSION:
+    _model_mod = importlib.reload(_model_mod)
+    _model_mod.CODE_VERSION = MODEL_CODE_VERSION
+
+from model import (CLASSES, CONTINUOUS, GROUPS, TARGET, label_for, load_default,  # noqa: E402
                    read_table, train, DATA_PATH as DATA_CSV)
 
 SAMPLE_DIR = DATA_CSV.parent.parent / "sample_data"
@@ -50,8 +61,10 @@ def get_data(file_bytes: bytes | None, file_name: str | None) -> pd.DataFrame:
     return read_table(buf)
 
 
-@st.cache_resource(show_spinner="Training models… (first run only)")
-def get_model(data_key: str, _df: pd.DataFrame):
+@st.cache_resource(show_spinner="Training 10 models… (about a minute, first run only)")
+def get_model(data_key: str, _df: pd.DataFrame, code_version: str = ""):
+    # code_version = hash of model.py, so a redeploy with new model code retrains
+    # instead of serving a stale cached result.
     return train(_df)
 
 
@@ -68,16 +81,37 @@ with st.sidebar:
 src = st.session_state.get("train_src")
 if src:
     df = get_data(*src)
-    res = get_model(hashlib.md5(src[0]).hexdigest(), df)
+    res = get_model(hashlib.md5(src[0]).hexdigest(), df, MODEL_CODE_VERSION)
     src_label = src[1]
 else:
     df = get_data(None, None)
-    res = get_model("default", df)
+    res = get_model("default", df, MODEL_CODE_VERSION)
     src_label = "Built-in dataset"
 
+if not hasattr(res, "use"):  # result cached by an older version of model.py
+    get_model.clear()
+    st.rerun()
+
+best_name = res.model_name
+ranked = res.leaderboard["Model"].tolist()
 with st.sidebar:
+    chosen = st.selectbox(
+        "Model used for predictions", ranked, index=0, key="chosen_model",
+        format_func=lambda m: f"{m} — {res.models[m]['accuracy']:.1%}"
+                              + (" ⭐ best" if m == best_name else ""))
+    res = res.use(chosen)
     st.success(f"**Model:** {res.model_name}\n\n**Test accuracy:** {res.accuracy:.1%}\n\n"
-               f"**Trained on:** {src_label} ({len(df):,} rows)")
+               f"**Trained on:** {src_label} ({len(df):,} rows, {len(ranked)} models compared)")
+
+
+def show_board(board: pd.DataFrame):
+    """Leaderboard of all trained models; the active model's row is highlighted."""
+    fmt = {"Accuracy": "{:.2%}", "F1 (macro)": "{:.3f}", "Precision (macro)": "{:.3f}",
+           "Recall (macro)": "{:.3f}", "Train time (s)": "{:.2f}"}
+    sty = board.style.format(fmt).apply(
+        lambda r: ["background-color: #cde8d6" if r["Model"] == res.model_name else ""
+                   for _ in r], axis=1)
+    st.dataframe(sty, width="stretch", hide_index=True)
 
 
 def hero(title: str, sub: str):
@@ -119,8 +153,8 @@ if page == "🏠 Home":
     a, b, c = st.columns(3)
     a.info("**1. Data** — 36 attributes per student: background, finances, "
            "and 1st/2nd semester results.")
-    b.info(f"**2. Model** — 3 algorithms are compared; **{res.model_name}** "
-           f"performed best ({res.accuracy:.1%} accuracy).")
+    b.info(f"**2. Model** — 10 algorithms are compared; **{best_name}** "
+           f"performed best ({res.models[best_name]['accuracy']:.1%} accuracy).")
     c.info("**3. Predict** — retrain on your own data in *Train Model*, then enter a student's details on the *Predict Student* "
            "page, or upload a file for batch prediction.")
     st.caption("Dataset: *Predict Students' Dropout and Academic Success* — "
@@ -157,9 +191,9 @@ elif page == "🧠 Train Model":
                 if vc.min() < 5:
                     st.error("Each Target class needs at least 5 students to train.")
                 elif st.button("🚀 Train models on this dataset", type="primary", width="stretch"):
-                    with st.spinner("Training Random Forest, Gradient Boosting and "
-                                    "Logistic Regression…"):
-                        get_model(hashlib.md5(up.getvalue()).hexdigest(), preview)
+                    with st.spinner("Training 10 models (Logistic Regression, Random Forest, SVM, "
+                                    "Neural Network…). This takes about a minute."):
+                        get_model(hashlib.md5(up.getvalue()).hexdigest(), preview, MODEL_CODE_VERSION)
                     st.session_state["train_src"] = (up.getvalue(), up.name)
                     st.session_state["just_trained"] = True
                     st.rerun()
@@ -175,14 +209,15 @@ elif page == "🧠 Train Model":
     if st.session_state.pop("just_trained", False):
         st.balloons()
         st.success(f"Training finished on **{src_label}**. All pages now use the new model.")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Training rows", f"{len(df):,}")
-    c2.metric("Best accuracy", f"{res.accuracy:.1%}")
-    c3.metric("F1 (macro)", f"{res.f1_macro:.3f}")
-    st.dataframe(res.leaderboard.style.format({"Accuracy": "{:.2%}", "F1 (macro)": "{:.3f}"}),
-                 width="stretch", hide_index=True)
-    st.caption(f"Best model: **{res.model_name}** (80% of rows used for training, "
-               "20% held out for testing). See *Model Performance* for details.")
+    c2.metric("Models trained", len(ranked))
+    c3.metric("Best accuracy", f"{res.models[best_name]['accuracy']:.1%}")
+    c4.metric("Best F1 (macro)", f"{res.models[best_name]['f1']:.3f}")
+    show_board(res.leaderboard)
+    st.caption(f"⭐ Best model: **{best_name}**. 80% of rows are used for training and 20% "
+               "held out for testing. Pick a different model in the sidebar to use it for "
+               "predictions. See *Model Performance* for details.")
 
 elif page == "📊 Data Explorer":
     hero("📊 Data Explorer", "Explore how student attributes relate to academic outcomes.")
@@ -322,14 +357,28 @@ elif page == "📁 Batch Prediction":
 else:  # Model Performance
     hero("📈 Model Performance", "How well the models predict on unseen students (20% test set).")
     c1, c2, c3 = st.columns(3)
-    c1.markdown(f"**Selected model**\n\n### {res.model_name}")
-    c2.metric("Accuracy", f"{res.accuracy:.1%}")
-    c3.metric("F1 score (macro)", f"{res.f1_macro:.3f}")
+    c1.markdown(f"**Best model**\n\n### ⭐ {best_name}")
+    c2.metric("Best accuracy", f"{res.models[best_name]['accuracy']:.1%}")
+    c3.metric("Models compared", len(ranked))
 
-    st.subheader("Model comparison")
-    st.dataframe(res.leaderboard.style.format({"Accuracy": "{:.2%}", "F1 (macro)": "{:.3f}"})
-                 .highlight_max(subset=["Accuracy"], color="#cde8d6"),
-                 width="stretch", hide_index=True)
+    st.subheader(f"Comparison of {len(ranked)} models")
+    board = res.leaderboard
+    long = board.melt(id_vars="Model", value_vars=["Accuracy", "F1 (macro)"],
+                      var_name="Metric", value_name="Score")
+    fig = px.bar(long, x="Score", y="Model", color="Metric", barmode="group",
+                 orientation="h", text=long["Score"].map(lambda v: f"{v:.1%}"),
+                 category_orders={"Model": ranked},
+                 color_discrete_map={"Accuracy": "#3A6FD8", "F1 (macro)": "#9DB8EE"})
+    fig.update_layout(height=520, xaxis_range=[0, 1], xaxis_tickformat=".0%",
+                      yaxis_title="", legend_title="", margin=dict(t=20))
+    st.plotly_chart(fig, width="stretch")
+    show_board(board)
+    st.caption("Accuracy = share of test students predicted correctly. F1 (macro) averages "
+               "the 3 classes equally, so it also rewards getting *Enrolled* right.")
+
+    st.subheader("Inspect a model")
+    inspect = st.selectbox("Model", ranked, index=ranked.index(res.model_name))
+    res = res.use(inspect)
     l, r = st.columns(2)
     with l:
         labels = list(res.model.classes_)

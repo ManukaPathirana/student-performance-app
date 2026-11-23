@@ -8,7 +8,7 @@ using the UCI *Predict Students' Dropout and Academic Success* dataset (4,424 st
 - **Data Explorer** – outcome breakdown by any attribute, correlations, raw data
 - **Predict Student** – form with all attributes → predicted outcome, probabilities, recommendation
 - **Batch Prediction** – upload CSV/Excel of many students, download predictions
-- **Model Performance** – Random Forest vs Gradient Boosting vs Logistic Regression, confusion matrix, feature importance
+- **Model Performance** – compares 10 models (Logistic Regression, Decision Tree, Random Forest, Extra Trees, Gradient Boosting, AdaBoost, KNN, SVM, Naive Bayes, Neural Network), confusion matrix, feature importance; pick any model for predictions from the sidebar
 - **Train Model** – upload your own dataset (same columns + `Target`) and retrain the models; sample files are in `sample_data/`
 
 ## Run locally

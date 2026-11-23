@@ -3,17 +3,26 @@ Student Academic Performance Prediction System."""
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import (AdaBoostClassifier, ExtraTreesClassifier,
+                              HistGradientBoostingClassifier, RandomForestClassifier)
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
+                             f1_score, precision_score, recall_score)
 from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 
 DATA_PATH = Path(__file__).parent / "data" / "data.csv"
 TARGET = "Target"
@@ -133,6 +142,38 @@ class TrainResult:
     defaults: dict = field(default_factory=dict)
     options: dict = field(default_factory=dict)
     ranges: dict = field(default_factory=dict)
+    models: dict = field(default_factory=dict)  # name -> per-model details
+
+    def use(self, name: str) -> "TrainResult":
+        """Return a copy where the active model is `name` (one of the trained models)."""
+        m = self.models[name]
+        return replace(self, model=m["model"], model_name=name, accuracy=m["accuracy"],
+                       f1_macro=m["f1"], confusion=m["confusion"], report=m["report"])
+
+
+def make_models() -> dict:
+    """The 10 classifiers that are trained and compared."""
+    scaled = lambda est: make_pipeline(StandardScaler(), est)  # noqa: E731
+    return {
+        "Logistic Regression": scaled(LogisticRegression(max_iter=2000, C=0.5)),
+        "Decision Tree": DecisionTreeClassifier(max_depth=8, min_samples_leaf=10,
+                                                random_state=RANDOM_STATE),
+        "Random Forest": RandomForestClassifier(
+            n_estimators=200, class_weight="balanced_subsample", n_jobs=-1,
+            random_state=RANDOM_STATE),
+        "Extra Trees": ExtraTreesClassifier(n_estimators=200, n_jobs=-1,
+                                            random_state=RANDOM_STATE),
+        "Gradient Boosting": HistGradientBoostingClassifier(
+            max_iter=200, learning_rate=0.08, random_state=RANDOM_STATE),
+        "AdaBoost": AdaBoostClassifier(n_estimators=200, learning_rate=0.5,
+                                       random_state=RANDOM_STATE),
+        "K-Nearest Neighbors": scaled(KNeighborsClassifier(n_neighbors=15, weights="distance")),
+        "Support Vector Machine": scaled(CalibratedClassifierCV(SVC(C=1.0), ensemble=False)),
+        "Naive Bayes": GaussianNB(),
+        "Neural Network (MLP)": scaled(MLPClassifier(
+            hidden_layer_sizes=(64, 32), alpha=1e-3, max_iter=500, early_stopping=True,
+            random_state=RANDOM_STATE)),
+    }
 
 
 def train(df: pd.DataFrame) -> TrainResult:
@@ -145,23 +186,27 @@ def train(df: pd.DataFrame) -> TrainResult:
     X_tr, X_te, y_tr, y_te = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=RANDOM_STATE)
 
-    candidates = {
-        "Random Forest": RandomForestClassifier(
-            n_estimators=200, class_weight="balanced_subsample", n_jobs=-1,
-            random_state=RANDOM_STATE),
-        "Gradient Boosting": HistGradientBoostingClassifier(
-            max_iter=200, learning_rate=0.08, random_state=RANDOM_STATE),
-        "Logistic Regression": make_pipeline(
-            StandardScaler(), LogisticRegression(max_iter=2000, C=0.5)),
-    }
-    rows, fitted = [], {}
-    for name, est in candidates.items():
+    rows, fitted, models = [], {}, {}
+    for name, est in make_models().items():
+        t0 = time.perf_counter()
         est.fit(X_tr, y_tr)
+        secs = time.perf_counter() - t0
         pred = est.predict(X_te)
-        rows.append({"Model": name, "Accuracy": accuracy_score(y_te, pred),
-                     "F1 (macro)": f1_score(y_te, pred, average="macro")})
+        acc = accuracy_score(y_te, pred)
+        f1 = f1_score(y_te, pred, average="macro")
+        rows.append({"Model": name, "Accuracy": acc, "F1 (macro)": f1,
+                     "Precision (macro)": precision_score(y_te, pred, average="macro",
+                                                          zero_division=0),
+                     "Recall (macro)": recall_score(y_te, pred, average="macro"),
+                     "Train time (s)": secs})
         fitted[name] = est
-    board = pd.DataFrame(rows).sort_values("Accuracy", ascending=False).reset_index(drop=True)
+        models[name] = {
+            "model": est, "accuracy": float(acc), "f1": float(f1),
+            "confusion": confusion_matrix(y_te, pred, labels=list(est.classes_)),
+            "report": pd.DataFrame(classification_report(
+                y_te, pred, output_dict=True, zero_division=0)).T}
+    board = pd.DataFrame(rows).sort_values(["Accuracy", "F1 (macro)"], ascending=False)         .reset_index(drop=True)
+    board.insert(0, "Rank", range(1, len(board) + 1))
     best_name = board.loc[0, "Model"]
     best = fitted[best_name]
     pred = best.predict(X_te)
@@ -187,4 +232,5 @@ def train(df: pd.DataFrame) -> TrainResult:
         accuracy=float(accuracy_score(y_te, pred)),
         f1_macro=float(f1_score(y_te, pred, average="macro")),
         confusion=confusion_matrix(y_te, pred, labels=labels), report=report,
-        importance=importance, defaults=defaults, options=options, ranges=ranges)
+        importance=importance, defaults=defaults, options=options, ranges=ranges,
+        models=models)
