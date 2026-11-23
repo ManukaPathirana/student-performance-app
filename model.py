@@ -31,6 +31,9 @@ DATA_PATH = Path(__file__).parent / "data" / "data.csv"
 TARGET = "Target"
 CLASSES = ["Not Qualified", "Qualified", "High Achiever"]
 RANDOM_STATE = 42
+# Single process: parallel joblib workers each copy the data and push peak memory
+# above the ~1 GB limit of Streamlit Community Cloud.
+N_JOBS = 1
 
 # ---------------------------------------------------------------------------
 # Human-readable labels for the coded columns of the Sri Lankan G.C.E. A/L 2020
@@ -131,7 +134,7 @@ class HybridRFANN(ClassifierMixin, BaseEstimator):
 
     def _rf(self):
         return RandomForestClassifier(n_estimators=self.n_estimators, min_samples_leaf=20,
-                                      n_jobs=-1, random_state=self.random_state)
+                                      n_jobs=N_JOBS, random_state=self.random_state)
 
     def fit(self, X, y):
         X = np.asarray(X, dtype=float)
@@ -197,10 +200,10 @@ def make_models() -> dict:
         # information only) and fully grown trees memorise noise.
         "Bagging (Decision Trees)": BaggingClassifier(
             DecisionTreeClassifier(min_samples_leaf=10, random_state=rs), n_estimators=100,
-            n_jobs=-1, random_state=rs),
+            n_jobs=N_JOBS, random_state=rs),
         "Random Forest": RandomForestClassifier(
-            n_estimators=200, min_samples_leaf=20, n_jobs=-1, random_state=rs),
-        "Extra Trees": ExtraTreesClassifier(n_estimators=200, min_samples_leaf=10, n_jobs=-1,
+            n_estimators=200, min_samples_leaf=20, n_jobs=N_JOBS, random_state=rs),
+        "Extra Trees": ExtraTreesClassifier(n_estimators=200, min_samples_leaf=10, n_jobs=N_JOBS,
                                             random_state=rs),
         # --- boosting: trees built one after another, each fixing earlier errors (reduces bias) ---
         "Gradient Boosting": HistGradientBoostingClassifier(
@@ -209,7 +212,7 @@ def make_models() -> dict:
         # --- stacking / voting: combine different model types ---
         "Voting (soft)": VotingClassifier(
             estimators=[("rf", RandomForestClassifier(n_estimators=200, min_samples_leaf=20,
-                                                      n_jobs=-1, random_state=rs)),
+                                                      n_jobs=N_JOBS, random_state=rs)),
                         ("gb", HistGradientBoostingClassifier(max_iter=200,
                                                               learning_rate=0.08,
                                                               random_state=rs)),
@@ -217,9 +220,9 @@ def make_models() -> dict:
             voting="soft"),
         "Stacking": StackingClassifier(
             estimators=[("rf", RandomForestClassifier(n_estimators=150, min_samples_leaf=20,
-                                                      n_jobs=-1, random_state=rs)),
+                                                      n_jobs=N_JOBS, random_state=rs)),
                         ("et", ExtraTreesClassifier(n_estimators=150, min_samples_leaf=10,
-                                                    n_jobs=-1, random_state=rs)),
+                                                    n_jobs=N_JOBS, random_state=rs)),
                         ("gb", HistGradientBoostingClassifier(max_iter=150,
                                                               learning_rate=0.08,
                                                               random_state=rs)),

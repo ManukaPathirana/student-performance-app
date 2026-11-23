@@ -54,7 +54,7 @@ st.markdown("""
 
 
 # --------------------------------------------------------------------------- data/model
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=3)
 def get_data(file_bytes: bytes | None, file_name: str | None) -> pd.DataFrame:
     if file_bytes is None:
         return load_default()
@@ -64,7 +64,7 @@ def get_data(file_bytes: bytes | None, file_name: str | None) -> pd.DataFrame:
     return read_table(buf)
 
 
-@st.cache_resource(show_spinner="Training 14 models (bagging, boosting, stacking, hybrid)… about 1–2 minutes, first run only")
+@st.cache_resource(max_entries=2, show_spinner="Training 14 models (bagging, boosting, stacking, hybrid)… about 1–2 minutes, first run only")
 def get_model(data_key: str, _df: pd.DataFrame, code_version: str = ""):
     # code_version = hash of model.py, so a redeploy with new model code retrains
     # instead of serving a stale cached result.
