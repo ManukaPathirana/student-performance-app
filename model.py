@@ -3,6 +3,7 @@ Student Academic Performance Prediction System."""
 from __future__ import annotations
 
 import io
+import json
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -28,80 +29,36 @@ from sklearn.tree import DecisionTreeClassifier
 
 DATA_PATH = Path(__file__).parent / "data" / "data.csv"
 TARGET = "Target"
-CLASSES = ["Dropout", "Enrolled", "Graduate"]
+CLASSES = ["Not Qualified", "Qualified", "High Achiever"]
 RANDOM_STATE = 42
 
 # ---------------------------------------------------------------------------
-# Human-readable labels for the coded columns (UCI "Predict Students' Dropout
-# and Academic Success" dataset). Codes not listed are shown as "Code N".
+# Human-readable labels for the coded columns of the Sri Lankan G.C.E. A/L 2020
+# dataset prepared by scripts/prepare_al_data.py. Codes not listed are "Code N".
 # ---------------------------------------------------------------------------
+_SUBJECTS_PATH = Path(__file__).parent / "data" / "subjects.json"
+_SUBJECTS = ({int(k): v.title().replace("&", "and")
+              for k, v in json.loads(_SUBJECTS_PATH.read_text()).items()}
+             if _SUBJECTS_PATH.exists() else {})
+
 LABELS: dict[str, dict[int, str]] = {
-    "Marital status": {1: "Single", 2: "Married", 3: "Widower", 4: "Divorced",
-                       5: "Facto union", 6: "Legally separated"},
-    "Application mode": {
-        1: "1st phase - general contingent", 2: "Ordinance No. 612/93",
-        5: "1st phase - special contingent (Azores)", 7: "Holders of other higher courses",
-        10: "Ordinance No. 854-B/99", 15: "International student (bachelor)",
-        16: "1st phase - special contingent (Madeira)", 17: "2nd phase - general contingent",
-        18: "3rd phase - general contingent", 26: "Ordinance No. 533-A/99, item b2",
-        27: "Ordinance No. 533-A/99, item b3", 39: "Over 23 years old", 42: "Transfer",
-        43: "Change of course", 44: "Technological specialization diploma holders",
-        51: "Change of institution/course", 53: "Short cycle diploma holders",
-        57: "Change of institution/course (International)"},
-    "Course": {
-        33: "Biofuel Production Technologies", 171: "Animation and Multimedia Design",
-        8014: "Social Service (evening)", 9003: "Agronomy", 9070: "Communication Design",
-        9085: "Veterinary Nursing", 9119: "Informatics Engineering", 9130: "Equinculture",
-        9147: "Management", 9238: "Social Service", 9254: "Tourism", 9500: "Nursing",
-        9556: "Oral Hygiene", 9670: "Advertising and Marketing Management",
-        9773: "Journalism and Communication", 9853: "Basic Education",
-        9991: "Management (evening)"},
-    "Daytime/evening attendance": {1: "Daytime", 0: "Evening"},
-    "Previous qualification": {
-        1: "Secondary education", 2: "Bachelor's degree", 3: "Degree", 4: "Master's",
-        5: "Doctorate", 6: "Frequency of higher education", 9: "12th year - not completed",
-        10: "11th year - not completed", 12: "Other - 11th year", 14: "10th year",
-        15: "10th year - not completed", 19: "Basic education 3rd cycle",
-        38: "Basic education 2nd cycle", 39: "Technological specialization course",
-        40: "Higher education - degree (1st cycle)", 42: "Professional higher technical course",
-        43: "Higher education - master (2nd cycle)"},
-    "Nacionality": {
-        1: "Portuguese", 2: "German", 6: "Spanish", 11: "Italian", 13: "Dutch", 14: "English",
-        17: "Lithuanian", 21: "Angolan", 22: "Cape Verdean", 24: "Guinean",
-        25: "Mozambican", 26: "Santomean", 32: "Turkish", 41: "Brazilian", 62: "Romanian",
-        100: "Moldova", 101: "Mexican", 103: "Ukrainian", 105: "Russian", 108: "Cuban",
-        109: "Colombian"},
+    "Stream": {0: "Arts", 1: "Commerce", 2: "Biological Science", 3: "Physical Science",
+               4: "Engineering Technology", 5: "Biosystems Technology"},
+    "Subject 1": _SUBJECTS, "Subject 2": _SUBJECTS, "Subject 3": _SUBJECTS,
     "Gender": {1: "Male", 0: "Female"},
+    "Syllabus": {1: "New syllabus", 0: "Old syllabus"},
+    "General English": {-1: "Absent", 0: "F (fail)", 1: "S", 2: "C", 3: "B", 4: "A"},
 }
-for _yn in ["Displaced", "Educational special needs", "Debtor", "Tuition fees up to date",
-            "Scholarship holder", "International"]:
-    LABELS[_yn] = {1: "Yes", 0: "No"}
 
 # Feature groups used to lay out the prediction form.
 GROUPS: dict[str, list[str]] = {
-    "👤 Personal": ["Gender", "Age at enrollment", "Marital status", "Nacionality",
-                   "International", "Displaced", "Educational special needs"],
-    "🎓 Application & Background": ["Course", "Daytime/evening attendance", "Application mode",
-                                   "Application order", "Previous qualification",
-                                   "Previous qualification (grade)", "Admission grade"],
-    "👪 Family": ["Mother's qualification", "Father's qualification",
-                 "Mother's occupation", "Father's occupation"],
-    "💰 Financial": ["Scholarship holder", "Tuition fees up to date", "Debtor"],
-    "📘 1st Semester": [c for c in [
-        "Curricular units 1st sem (credited)", "Curricular units 1st sem (enrolled)",
-        "Curricular units 1st sem (evaluations)", "Curricular units 1st sem (approved)",
-        "Curricular units 1st sem (grade)", "Curricular units 1st sem (without evaluations)"]],
-    "📗 2nd Semester": [
-        "Curricular units 2nd sem (credited)", "Curricular units 2nd sem (enrolled)",
-        "Curricular units 2nd sem (evaluations)", "Curricular units 2nd sem (approved)",
-        "Curricular units 2nd sem (grade)", "Curricular units 2nd sem (without evaluations)"],
-    "📉 Economy (at enrollment)": ["Unemployment rate", "Inflation rate", "GDP"],
+    "📚 Subjects": ["Stream", "Subject 1", "Subject 2", "Subject 3", "Syllabus"],
+    "👤 Student": ["Gender", "Age at exam"],
+    "📝 General tests": ["CGT score", "General English"],
 }
 
 # Numeric (continuous) columns -> number inputs; everything else -> select boxes.
-CONTINUOUS = {"Previous qualification (grade)", "Admission grade", "Age at enrollment",
-              "Application order", "Unemployment rate", "Inflation rate", "GDP"} | {
-    c for g in ("📘 1st Semester", "📗 2nd Semester") for c in GROUPS[g]}
+CONTINUOUS = {"Age at exam", "CGT score"}
 
 
 def label_for(col: str, code) -> str:
@@ -173,9 +130,8 @@ class HybridRFANN(ClassifierMixin, BaseEstimator):
         self.random_state = random_state
 
     def _rf(self):
-        return RandomForestClassifier(n_estimators=self.n_estimators,
-                                      class_weight="balanced_subsample", n_jobs=-1,
-                                      random_state=self.random_state)
+        return RandomForestClassifier(n_estimators=self.n_estimators, min_samples_leaf=20,
+                                      n_jobs=-1, random_state=self.random_state)
 
     def fit(self, X, y):
         X = np.asarray(X, dtype=float)
@@ -230,36 +186,40 @@ def make_models() -> dict:
         "Decision Tree": DecisionTreeClassifier(max_depth=8, min_samples_leaf=10,
                                                 random_state=rs),
         "K-Nearest Neighbors": scaled(KNeighborsClassifier(n_neighbors=15, weights="distance")),
-        "Support Vector Machine": scaled(CalibratedClassifierCV(SVC(C=1.0), ensemble=False)),
+        "Support Vector Machine": scaled(CalibratedClassifierCV(SVC(C=1.0), ensemble=False,
+                                                                cv=3)),
         "Naive Bayes": GaussianNB(),
         "Neural Network (MLP)": scaled(MLPClassifier(
             hidden_layer_sizes=(64, 32), alpha=1e-3, max_iter=500, early_stopping=True,
             random_state=rs)),
         # --- bagging: many trees on bootstrap samples, averaged (reduces variance) ---
+        # min_samples_leaf regularises the trees: the A/L features are noisy (pre-exam
+        # information only) and fully grown trees memorise noise.
         "Bagging (Decision Trees)": BaggingClassifier(
-            DecisionTreeClassifier(random_state=rs), n_estimators=100, n_jobs=-1,
-            random_state=rs),
+            DecisionTreeClassifier(min_samples_leaf=10, random_state=rs), n_estimators=100,
+            n_jobs=-1, random_state=rs),
         "Random Forest": RandomForestClassifier(
-            n_estimators=200, class_weight="balanced_subsample", n_jobs=-1, random_state=rs),
-        "Extra Trees": ExtraTreesClassifier(n_estimators=200, n_jobs=-1, random_state=rs),
+            n_estimators=200, min_samples_leaf=20, n_jobs=-1, random_state=rs),
+        "Extra Trees": ExtraTreesClassifier(n_estimators=200, min_samples_leaf=10, n_jobs=-1,
+                                            random_state=rs),
         # --- boosting: trees built one after another, each fixing earlier errors (reduces bias) ---
         "Gradient Boosting": HistGradientBoostingClassifier(
             max_iter=200, learning_rate=0.08, random_state=rs),
         "AdaBoost": AdaBoostClassifier(n_estimators=200, learning_rate=0.5, random_state=rs),
         # --- stacking / voting: combine different model types ---
         "Voting (soft)": VotingClassifier(
-            estimators=[("rf", RandomForestClassifier(n_estimators=200, n_jobs=-1,
-                                                      random_state=rs)),
+            estimators=[("rf", RandomForestClassifier(n_estimators=200, min_samples_leaf=20,
+                                                      n_jobs=-1, random_state=rs)),
                         ("gb", HistGradientBoostingClassifier(max_iter=200,
                                                               learning_rate=0.08,
                                                               random_state=rs)),
                         ("lr", scaled(LogisticRegression(max_iter=2000, C=0.5)))],
             voting="soft"),
         "Stacking": StackingClassifier(
-            estimators=[("rf", RandomForestClassifier(n_estimators=150, n_jobs=-1,
-                                                      random_state=rs)),
-                        ("et", ExtraTreesClassifier(n_estimators=150, n_jobs=-1,
-                                                    random_state=rs)),
+            estimators=[("rf", RandomForestClassifier(n_estimators=150, min_samples_leaf=20,
+                                                      n_jobs=-1, random_state=rs)),
+                        ("et", ExtraTreesClassifier(n_estimators=150, min_samples_leaf=10,
+                                                    n_jobs=-1, random_state=rs)),
                         ("gb", HistGradientBoostingClassifier(max_iter=150,
                                                               learning_rate=0.08,
                                                               random_state=rs)),
@@ -322,6 +282,10 @@ def train(df: pd.DataFrame) -> TrainResult:
             vc = s.astype(int).value_counts()
             defaults[c] = int(vc.index[0])
             options[c] = sorted(vc.index.tolist(), key=lambda v: (-vc[v], v))
+    combo = [c for c in ("Stream", "Subject 1", "Subject 2", "Subject 3") if c in features]
+    if len(combo) > 1:  # default to the most common real subject combination
+        defaults.update(dict(zip(combo, (int(v) for v in
+                                         X[combo].astype(int).value_counts().index[0]))))
 
     return TrainResult(
         model=best, model_name=best_name, features=features, leaderboard=board,

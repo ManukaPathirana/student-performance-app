@@ -28,15 +28,17 @@ SAMPLE_DIR = DATA_CSV.parent.parent / "sample_data"
 st.set_page_config(page_title="Student Academic Performance Prediction System",
                    page_icon="🎓", layout="wide")
 
-COLORS = {"Dropout": "#E4572E", "Enrolled": "#F3A712", "Graduate": "#29A36A"}
+COLORS = {"Not Qualified": "#E4572E", "Qualified": "#F3A712", "High Achiever": "#29A36A"}
 ADVICE = {
-    "Dropout": ("High risk of dropping out",
-                "Schedule an academic advisor meeting, check financial situation "
-                "(tuition / debts / scholarship) and monitor semester progress closely."),
-    "Enrolled": ("Still enrolled — progress is slower than expected",
-                 "Offer tutoring for units not yet approved and set clear semester goals."),
-    "Graduate": ("On track to graduate",
-                 "Keep up the good work. Consider mentoring or advanced opportunities."),
+    "Not Qualified": ("At risk of failing at least one A/L subject",
+                      "Give extra support in the weakest subject (past papers, revision "
+                      "classes), check attendance, and plan for a repeat attempt if needed."),
+    "Qualified": ("Likely to pass all three subjects (university-eligible range)",
+                  "Push for higher grades to improve the Z-score — selection to popular "
+                  "university courses depends on it."),
+    "High Achiever": ("Likely to pass all three subjects with a high Z-score (≥ 1.0)",
+                      "Strong candidate for competitive university courses. Keep up the "
+                      "momentum and consider mentoring peers."),
 }
 
 st.markdown("""
@@ -130,12 +132,12 @@ def pretty(col: str, s: pd.Series) -> pd.Series:
 # --------------------------------------------------------------------------- pages
 if page == "🏠 Home":
     hero("🎓 Student Academic Performance Prediction System",
-         "Predict whether a student will Drop out, stay Enrolled or Graduate — "
-         "using demographic, socio-economic and academic data.")
+         "Predict a Sri Lankan student's G.C.E. Advanced Level result — Not Qualified, "
+         "Qualified or High Achiever — from subjects, CGT, General English and profile.")
     counts = df[TARGET].value_counts()
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total students", f"{len(df):,}")
-    for col, name in zip((c2, c3, c4), ("Graduate", "Enrolled", "Dropout")):
+    for col, name in zip((c2, c3, c4), ("High Achiever", "Qualified", "Not Qualified")):
         n = counts.get(name, 0)
         col.metric(f"{name} ({n / len(df):.0%})", f"{n:,}")
 
@@ -143,34 +145,37 @@ if page == "🏠 Home":
     with left:
         fig = px.pie(names=counts.index, values=counts.values, hole=.55,
                      color=counts.index, color_discrete_map=COLORS,
-                     title="Student outcome distribution")
+                     title="A/L result distribution")
         st.plotly_chart(fig, width="stretch")
     with right:
         top = res.importance.head(10)[::-1]
         fig = px.bar(x=top.values, y=top.index, orientation="h",
-                     title="Top 10 factors influencing outcome",
+                     title="Factors influencing the A/L result",
                      labels={"x": "Importance", "y": ""})
         fig.update_traces(marker_color="#3A6FD8")
         st.plotly_chart(fig, width="stretch")
 
     st.subheader("How it works")
     a, b, c = st.columns(3)
-    a.info("**1. Data** — 36 attributes per student: background, finances, "
-           "and 1st/2nd semester results.")
+    a.info("**1. Data** — Sri Lankan G.C.E. A/L 2020 results (Department of Examinations): "
+           f"{len(df):,} students sampled from 256,606 candidates. 9 attributes per student.")
     b.info(f"**2. Model** — {len(ranked)} models (bagging, boosting, stacking, voting, "
            f"hybrid RF+ANN and single-model baselines) are compared; **{best_name}** "
            f"performed best ({res.models[best_name]['accuracy']:.1%} accuracy).")
     c.info("**3. Predict** — retrain on your own data in *Train Model*, then enter a student's details on the *Predict Student* "
            "page, or upload a file for batch prediction.")
-    st.caption("Dataset: *Predict Students' Dropout and Academic Success* — "
-               "UCI Machine Learning Repository (Realinho et al., 2021).")
+    st.caption("Dataset: G.C.E. Advanced Level Examination 2020 results, Sri Lanka "
+               "(public Kaggle upload of Department of Examinations data). "
+               "Not Qualified = failed ≥1 subject · Qualified = passed all 3, Z < 1.0 · "
+               "High Achiever = passed all 3, Z ≥ 1.0.")
 
 elif page == "🧠 Train Model":
     hero("🧠 Train the Model",
          "Upload a student dataset (CSV or Excel) and train the prediction models on it.")
     st.markdown("#### 1. Get a dataset")
-    st.write("The file needs the 36 student attribute columns plus a **Target** column "
-             "(Dropout / Enrolled / Graduate). Download the sample dataset to see the format.")
+    st.write("The file needs the 9 student attribute columns plus a **Target** column "
+             "(Not Qualified / Qualified / High Achiever). Download the sample dataset to see "
+             "the format.")
     d1, d2 = st.columns(2)
     d1.download_button("⬇️ Sample dataset (Excel)",
                        SAMPLE_DIR.joinpath("student_training_dataset.xlsx").read_bytes(),
@@ -228,8 +233,7 @@ elif page == "📊 Data Explorer":
     hero("📊 Data Explorer", "Explore how student attributes relate to academic outcomes.")
     feats = [c for c in df.columns if c != TARGET]
     col = st.selectbox("Choose an attribute", feats,
-                       index=feats.index("Curricular units 2nd sem (approved)")
-                       if "Curricular units 2nd sem (approved)" in feats else 0)
+                       index=feats.index("CGT score") if "CGT score" in feats else 0)
     tmp = df[[col, TARGET]].copy()
     if col in CONTINUOUS:
         fig = px.box(tmp, x=TARGET, y=col, color=TARGET, color_discrete_map=COLORS,
@@ -248,12 +252,11 @@ elif page == "📊 Data Explorer":
         st.plotly_chart(fig, width="stretch")
         st.dataframe(pd.crosstab(tmp[col], tmp[TARGET], margins=True), width="stretch")
 
-    st.subheader("Correlation of semester performance")
-    sem = [c for c in df.columns if c.startswith("Curricular")]
-    corr = df[sem].corr().round(2)
-    corr.index = corr.columns = [c.replace("Curricular units ", "") for c in sem]
-    st.plotly_chart(px.imshow(corr, color_continuous_scale="Blues", text_auto=True,
-                              aspect="auto"), width="stretch")
+    st.subheader("Result by stream")
+    ct = pd.crosstab(pretty("Stream", df["Stream"]), df[TARGET], normalize="index").mul(100)
+    ct = ct.reindex(columns=[c for c in CLASSES if c in ct.columns]).round(1)
+    st.plotly_chart(px.bar(ct, barmode="stack", orientation="h", color_discrete_map=COLORS,
+                           labels={"value": "%", "index": ""}), width="stretch")
     with st.expander("View raw data"):
         st.dataframe(df, width="stretch")
 
@@ -308,21 +311,23 @@ elif page == "🔮 Predict Student":
         with r:
             st.markdown("#### 💡 Recommendation")
             st.write(advice)
-            e1 = values.get("Curricular units 1st sem (enrolled)", 0) or 0
-            a1 = values.get("Curricular units 1st sem (approved)", 0) or 0
-            e2 = values.get("Curricular units 2nd sem (enrolled)", 0) or 0
-            a2 = values.get("Curricular units 2nd sem (approved)", 0) or 0
+            cgt = values.get("CGT score")
             m1, m2 = st.columns(2)
-            m1.metric("1st sem pass rate", f"{a1 / e1:.0%}" if e1 else "—")
-            m2.metric("2nd sem pass rate", f"{a2 / e2:.0%}" if e2 else "—")
-            if values.get("Tuition fees up to date") == 0:
-                st.warning("Tuition fees are not up to date — a strong dropout signal.")
-            if values.get("Debtor") == 1:
-                st.warning("Student is a debtor.")
+            m1.metric("CGT score", f"{cgt:.0f}" if cgt is not None else "—",
+                      help="Common General Test; 30 or more is required for university entry.")
+            m2.metric("General English", label_for("General English",
+                                                   values.get("General English")))
+            if cgt is not None and cgt < 30:
+                st.warning("CGT score is below 30 — the minimum needed for university entrance.")
+            if values.get("General English") in (-1, 0):
+                st.warning("General English is failed/absent — a strong signal of weak results.")
+            subs = {values.get(f"Subject {i}") for i in (1, 2, 3)}
+            if len(subs) < 3:
+                st.warning("The same subject is selected more than once.")
 
 elif page == "📁 Batch Prediction":
     hero("📁 Batch Prediction", "Upload a CSV / Excel file of students to predict all at once.")
-    st.write("The file needs the same 36 attribute columns as the training data "
+    st.write("The file needs the same 9 attribute columns as the training data "
              "(no Target column needed).")
     b1, b2 = st.columns(2)
     b1.download_button("⬇️ Sample students (Excel)",
@@ -379,7 +384,7 @@ elif page == "📈 Model Performance":
     st.plotly_chart(fig, width="stretch")
     show_board(board)
     st.caption("Accuracy = share of test students predicted correctly. F1 (macro) averages "
-               "the 3 classes equally, so it also rewards getting *Enrolled* right.")
+               "the 3 classes equally, so it also rewards getting the minority *High Achiever* class right.")
 
     st.subheader("Inspect a model")
     inspect = st.selectbox("Model", ranked, index=ranked.index(res.model_name))
@@ -400,8 +405,8 @@ elif page == "📈 Model Performance":
         st.dataframe(rep.style.format({"precision": "{:.2f}", "recall": "{:.2f}",
                                        "f1-score": "{:.2f}", "support": "{:.0f}"}),
                      width="stretch")
-        st.caption("*Enrolled* is the hardest class — those students sit between "
-                   "the dropout and graduate profiles.")
+        st.caption("*Qualified* sits between the other two profiles, and *High Achiever* is "
+                   "the smallest class, so these are the hardest to separate.")
     top = res.importance.head(15)[::-1]
     fig = px.bar(x=top.values, y=top.index, orientation="h", title="Feature importance (Random Forest)",
                  labels={"x": "Importance", "y": ""})
@@ -462,23 +467,24 @@ else:  # Ensemble Insights
     with l:
         st.dataframe(comp.style.format("{:.3f}"), width="stretch")
     with r:
-        better_f1 = gb if f1(gb) > f1(rf) else rf
-        enr = "Enrolled" if "Enrolled" in cls_list else cls_list[0]
+        enr = "High Achiever" if "High Achiever" in cls_list else cls_list[0]
+        maj = "Qualified" if "Qualified" in cls_list else cls_list[-1]
         st.markdown(
-            f"**What we see:** accuracy is almost the same ({acc(rf):.1%} vs {acc(gb):.1%}), "
-            f"but **{better_f1}** has the higher macro-F1, and recall on the hard *{enr}* "
-            f"class is {recall_of(rf, enr):.0%} for Random Forest vs "
-            f"{recall_of(gb, enr):.0%} for Gradient Boosting.\n\n"
+            f"**What we see:** Random Forest {acc(rf):.1%} vs Gradient Boosting "
+            f"{acc(gb):.1%} accuracy (macro-F1 {f1(rf):.3f} vs {f1(gb):.3f}). Recall on the "
+            f"small *{enr}* class: RF {recall_of(rf, enr):.0%} vs GB {recall_of(gb, enr):.0%}; "
+            f"on the big *{maj}* class: RF {recall_of(rf, maj):.0%} vs GB "
+            f"{recall_of(gb, maj):.0%}.\n\n"
             "**Why:**\n"
-            "- **Bagging (Random Forest)** trains many deep trees *in parallel* on bootstrap "
-            "samples and averages them. This mainly **reduces variance**, so it is stable and "
-            "hard to overfit, but the average leans towards the majority classes "
-            "(*Graduate*, *Dropout*).\n"
+            "- **Bagging (Random Forest)** trains many trees *in parallel* on bootstrap samples "
+            "and averages them. Averaging **reduces variance**, which matters here because the "
+            "pre-exam features are noisy. The average is pulled towards the majority class, so "
+            f"RF is very good on *{maj}* but finds fewer *{enr}* students. Fully grown trees "
+            "overfitted (≈52% accuracy); limiting leaf size (min 20 students) fixed this.\n"
             "- **Boosting (Gradient Boosting)** builds shallow trees *one after another*, each "
-            "fitting the errors of the previous ones. This **reduces bias** and pays extra "
-            f"attention to hard, borderline students, which is why it usually does better on "
-            f"the in-between *{enr}* class. The cost is sequential (slower) training and more "
-            "sensitivity to tuning.")
+            "fitting the errors of the previous ones. This **reduces bias** and focuses on the "
+            f"hard students, so it recovers more of the rare *{enr}* class, at the cost of "
+            "more mistakes on the majority class and higher sensitivity to tuning.")
 
     # ---------------------------------------------------------------- stacking
     st.subheader("3. Stacking & Voting — combining different models")
@@ -541,11 +547,12 @@ else:  # Ensemble Insights
             "as 3 extra inputs to a neural network, which is trained on the scaled original "
             "features + these \"forest opinions\".\n\n"
             f"**What we see:** the hybrid is {vs_ann * 100:+.1f} points vs the ANN alone and "
-            f"{vs_rf * 100:+.1f} points vs the Random Forest alone. The forest gives the ANN a "
-            "strong, already non-linear summary of the data. It does not clearly beat the "
-            "forest itself because on a small tabular dataset (~3,500 training rows) the "
-            "forest already captures most of the signal; the ANN also needed strong "
-            "regularisation (L2 alpha = 1.0) to stop it over-trusting the RF features.")
+            f"{vs_rf * 100:+.1f} points vs the Random Forest alone. The forest's probabilities "
+            "give the ANN a compact, non-linear summary of the subject combinations, so the "
+            "ANN improves. It cannot go far beyond the forest because both models see the same "
+            "9 pre-exam features — the remaining error is information that simply is not in "
+            "the data (study effort, school, tuition, exam-day performance). The ANN also needs "
+            "strong regularisation (L2 alpha = 1.0) so it does not over-trust the RF inputs.")
 
     # ---------------------------------------------------------------- behaviour
     st.subheader("5. Why the models behave this way")
@@ -565,29 +572,42 @@ else:  # Ensemble Insights
         fig.update_layout(height=380)
         st.plotly_chart(fig, width="stretch")
     share = df[TARGET].value_counts(normalize=True)
+    top3 = ", ".join(res.importance.index[:3])
     st.markdown(
-        "- **Semester results dominate.** Approved units and grades in the 1st and 2nd "
-        "semester are the strongest signals; students who pass few units are very likely to "
-        "drop out. Every model can use this, which is why many models land close together "
-        f"(median accuracy {board['Accuracy'].median():.0%}).\n"
-        f"- **Class imbalance.** Graduate {share.get('Graduate', 0):.0%}, Dropout "
-        f"{share.get('Dropout', 0):.0%}, Enrolled {share.get('Enrolled', 0):.0%}. *Enrolled* "
-        "students sit between the other two profiles, so every model finds them hardest; "
-        "macro-F1 is reported next to accuracy so this class is not ignored.\n"
+        f"- **What drives the result:** {top3}. The **CGT** (Common General Test) measures "
+        "general reasoning and is taken in the same exam, so it is the best single proxy for "
+        "overall ability; **General English** works the same way. **Gender** matters too: in "
+        "this data female candidates fail a subject far less often than male candidates. "
+        "**Age** acts non-linearly: 20–21-year-olds (typically a second attempt) fail less "
+        "often than first-time 19-year-olds but rarely become High Achievers, while "
+        "candidates over 23 do much worse. Its importance is also inflated because "
+        "impurity-based importance favours continuous features. The **subject combination** "
+        "captures how hard each stream is to pass.\n"
+        "- **Why accuracy is only ~60%:** the models only see 9 pre-exam attributes — not "
+        "marks, school, district, tuition or effort. A large part of the A/L result is "
+        f"not in these features, so all models land close together (median accuracy "
+        f"{board['Accuracy'].median():.0%}, vs {share.max():.0%} for always guessing the "
+        "largest class). This is a realistic, noisy problem — exactly where ensembles help.\n"
+        f"- **Class imbalance:** Qualified {share.get('Qualified', 0):.0%}, Not Qualified "
+        f"{share.get('Not Qualified', 0):.0%}, High Achiever "
+        f"{share.get('High Achiever', 0):.0%}. *High Achiever* is the smallest class and the "
+        "hardest to find; macro-F1 is reported next to accuracy so it is not ignored.\n"
         "- **Single models have clear weak spots:** Naive Bayes assumes independent features "
-        "(but 1st/2nd-semester features are strongly correlated); KNN struggles in 36 "
-        "dimensions; a single Decision Tree overfits. **Ensembles fix exactly these "
-        "weaknesses** — bagging lowers variance, boosting lowers bias, stacking mixes "
-        "different strengths.\n"
-        "- **Cost vs gain.** Stacking is the most expensive to train; Random Forest / Extra "
-        "Trees give nearly the same accuracy in a fraction of the time.")
+        "(stream and subjects are strongly linked); KNN treats subject codes as distances; "
+        "Logistic Regression can only draw linear boundaries over coded subjects; a single "
+        "Decision Tree overfits. **Ensembles fix exactly these weaknesses** — bagging lowers "
+        "variance, boosting lowers bias, stacking mixes different strengths.\n"
+        "- **Cost vs gain:** Stacking and SVM are the most expensive to train; a regularised "
+        "Random Forest gives top accuracy in about a second.")
 
     st.subheader("6. Conclusion")
+    best_f1_name = board.sort_values("F1 (macro)", ascending=False).iloc[0]["Model"]
     st.info(
-        f"**{best_name}** is the best model on this dataset ({acc(best_name):.1%} accuracy, "
-        f"{f1(best_name):.3f} macro-F1). Ensembles (bagging, boosting, stacking) beat most "
-        "single-model baselines, boosting handles the hard *Enrolled* class better than "
-        "bagging, and stacking adds a small extra gain by combining models that make "
-        "different errors.")
+        f"**{best_name}** has the best accuracy ({acc(best_name):.1%}) and **{best_f1_name}** "
+        f"the best macro-F1 ({f1(best_f1_name):.3f}) for predicting Sri Lankan A/L results "
+        "from pre-exam information. Regularised bagging is the strongest on accuracy, boosting "
+        "finds more of the rare *High Achiever* students, and stacking / the hybrid combine "
+        "models that make different errors for a more balanced result. Every ensemble family "
+        "beats the weakest single models (Naive Bayes, KNN, Logistic Regression).")
     st.caption("🤖 AI disclosure: code and dashboard generated with the help of Claude "
                "(Anthropic) and reviewed/tested by the student.")
